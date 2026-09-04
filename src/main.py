@@ -1,9 +1,23 @@
 import requests
+import json
 import os
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime, timezone
+from pydantic import BaseModel, HttpUrl, ValidationError
+from typing import Optional
 import time
+
+class BookRecord(BaseModel):
+    title: str
+    product_url: str
+    price_text: str
+    price_gbp: float
+    availability_text: str
+    rating_text: Optional[str] = None
+    description: Optional[str] = None
+    source_page: str
+    fetched_at: str
 
 CATALOGUE_URL = "https://books.toscrape.com/catalogue/page-1.html"
 CACHE_FILE = "cache/catalogue-page-1.html"
@@ -62,7 +76,7 @@ def discover_all_book_links():
         links = extract_book_links(html, current_url)
         for link in links:
             if link not in link_sources:
-                link_sources[link] = current_url   # <- yahan asal fill ho raha hai
+                link_sources[link] = current_url   
         all_links.extend(links)
         
         next_url = find_next_page(html, current_url)
@@ -79,7 +93,7 @@ def discover_all_book_links():
     print(f"discovered={len(all_links)}")
     print(f"unique_urls={len(unique_links)}")
     
-    return unique_links, link_sources   # <- ab dono return ho rahe hain
+    return unique_links, link_sources   
 
 def extract_book_details(html, product_url, source_page):
     soup = BeautifulSoup(html, "html.parser")
@@ -127,9 +141,58 @@ def scrape_all_books(book_links, link_sources):
     print(f"detail_pages={len(all_records)}")
     return all_records
 
+def parse_price(price_text):
+    # Remove the £ symbol and commas, then convert the value to a float
+    cleaned = price_text.replace("£", "").replace(",", "").strip()
+    return float(cleaned)
+
+def normalize_and_validate(raw_records):
+    valid_records = []
+    errors = []
+    seen_urls = set()  # duplicate check 
+    
+    for raw in raw_records:
+        try:
+            # For the duplicate check - if this URL has already been seen, skip it.
+            if raw["product_url"] in seen_urls:
+                continue
+            seen_urls.add(raw["product_url"])
+            
+            price_gbp = parse_price(raw["price_text"])
+            
+            record = BookRecord(
+                title=raw["title"],
+                product_url=raw["product_url"],
+                price_text=raw["price_text"],
+                price_gbp=price_gbp,
+                availability_text=raw["availability_text"],
+                rating_text=raw["rating_text"],
+                description=raw["description"],
+                source_page=raw["source_page"],
+                fetched_at=raw["fetched_at"],
+            )
+            valid_records.append(record.model_dump())
+        
+        except (ValidationError, ValueError) as e:
+            errors.append({"record": raw, "reason": str(e)})
+    
+    return valid_records, errors
+
+def save_output(valid_records, errors):
+    os.makedirs("output", exist_ok=True)
+    
+    with open("output/books.json", "w", encoding="utf-8") as f:
+        json.dump(valid_records, f, indent=2, ensure_ascii=False)
+    
+    with open("output/errors.json", "w", encoding="utf-8") as f:
+        json.dump(errors, f, indent=2, ensure_ascii=False)
+    
+    print(f"valid_records={len(valid_records)}")
+    print(f"invalid_records={len(errors)}")
+
 
 if __name__ == "__main__":
     links, link_sources = discover_all_book_links()
     records = scrape_all_books(links, link_sources)
-    import json
-    print(json.dumps(records[0], indent=2))
+    valid_records, errors = normalize_and_validate(records)
+    save_output(valid_records, errors)
