@@ -24,12 +24,18 @@ CACHE_FILE = "cache/catalogue-page-1.html"
 USER_AGENT = "FlyRankInternshipA9/1.0 (+https://github.com/abubakar1yousafzai/polite-scraper)"
 TIMEOUT = 10  # seconds
 
+fetch_count = 0
+cache_hit_count = 0
+
 def fetch_page(url, cache_path):
+    global fetch_count, cache_hit_count
     if os.path.exists(cache_path):
+        cache_hit_count += 1
         print(f"CACHE HIT: reading {cache_path}")
         with open(cache_path, "r", encoding="utf-8") as f:
             return f.read()
-    
+
+    fetch_count += 1
     print(f"FETCH: requesting {url}")
     headers = {"User-Agent": USER_AGENT}
     response = requests.get(url, headers=headers, timeout=TIMEOUT)
@@ -131,15 +137,42 @@ def extract_book_details(html, product_url, source_page):
 
 def scrape_all_books(book_links, link_sources):
     all_records = []
+    failed_pages = []
+    
     for i, url in enumerate(book_links, start=1):
         cache_path = f"cache/book-{i}.html"
-        html = fetch_page(url, cache_path)
         source_page = link_sources.get(url, "unknown")
-        record = extract_book_details(html, url, source_page)
-        all_records.append(record)
+        
+        try:
+            html = fetch_page_with_retry(url, cache_path)
+            record = extract_book_details(html, url, source_page)
+            all_records.append(record)
+        except Exception as e:
+            print(f"FAILED: {url} - {e}")
+            failed_pages.append({"url": url, "reason": str(e)})
     
     print(f"detail_pages={len(all_records)}")
-    return all_records
+    return all_records, failed_pages
+
+def fetch_page_with_retry(url, cache_path, max_retries=1):
+    for attempt in range(max_retries + 1):
+        try:
+            return fetch_page(url, cache_path)
+        except requests.exceptions.Timeout:
+            if attempt < max_retries:
+                print(f"RETRY: timeout on {url}, waiting before retry...")
+                time.sleep(2)
+                continue
+            raise
+        except Exception as e:
+            # agar status code 404 ya 403 ho, retry mat karo
+            if "404" in str(e) or "403" in str(e):
+                raise
+            if attempt < max_retries:
+                print(f"RETRY: error on {url}, waiting before retry...")
+                time.sleep(2)
+                continue
+            raise
 
 def parse_price(price_text):
     # Remove the £ symbol and commas, then convert the value to a float
@@ -191,8 +224,39 @@ def save_output(valid_records, errors):
     print(f"invalid_records={len(errors)}")
 
 
+
+def save_run_report(start_time, pages_fetched, cache_hits, valid_count, invalid_count, failed_pages):
+    end_time = datetime.now(timezone.utc)
+    duration_seconds = (end_time - start_time).total_seconds()
+    
+    report = {
+        "start_time": start_time.isoformat(),
+        "duration_seconds": duration_seconds,
+        "pages_fetched": pages_fetched,
+        "cache_hits": cache_hits,
+        "valid_records": valid_count,
+        "invalid_records": invalid_count,
+        "failed_pages": len(failed_pages),
+        "failed_page_details": failed_pages,
+    }
+    
+    with open("output/run-report.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    
+    print(f"failed_pages={len(failed_pages)}")
+    return report
+
+
 if __name__ == "__main__":
+    start_time = datetime.now(timezone.utc)
+    
     links, link_sources = discover_all_book_links()
-    records = scrape_all_books(links, link_sources)
+    
+    fake_url = "https://books.toscrape.com/catalogue/this-book-does-not-exist/index.html"
+    links.append(fake_url)
+    link_sources[fake_url] = "test"
+    
+    records, failed_pages = scrape_all_books(links, link_sources)
     valid_records, errors = normalize_and_validate(records)
     save_output(valid_records, errors)
+    save_run_report(start_time, fetch_count, cache_hit_count, len(valid_records), len(errors), failed_pages)
